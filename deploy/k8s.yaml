@@ -1,0 +1,108 @@
+# gemini-mcp-adapter on k3s (oci-arm2). Same conventions as the other workloads:
+# hostPath under /opt/<name>, Ingress fronted by Cloudflare (so no certresolver).
+# config.yaml lives on the host because the panel edits it at runtime.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemini-mcp-adapter
+  namespace: default
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gemini-mcp-adapter
+  template:
+    metadata:
+      labels:
+        app: gemini-mcp-adapter
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      initContainers:
+        - name: install
+          image: docker.io/library/node:24-bookworm-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cd /work && npm ci --omit=dev --no-audit --no-fund
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - name: app
+              mountPath: /work
+      containers:
+        - name: adapter
+          image: docker.io/library/node:24-bookworm-slim
+          command: ["node", "src/index.mjs"]
+          workingDir: /app
+          ports:
+            - containerPort: 3334
+          env:
+            - name: ADAPTER_CONFIG
+              value: /data/config.yaml
+            - name: HOST
+              value: "0.0.0.0"
+          volumeMounts:
+            - name: app
+              mountPath: /app
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3334
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 30m
+              memory: 96Mi
+            limits:
+              memory: 384Mi
+      volumes:
+        - name: app
+          hostPath:
+            path: /opt/gemini-mcp-adapter/app
+            type: Directory
+        - name: data
+          hostPath:
+            path: /opt/gemini-mcp-adapter/data
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemini-mcp-adapter
+  namespace: default
+spec:
+  selector:
+    app: gemini-mcp-adapter
+  ports:
+    - port: 3334
+      targetPort: 3334
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gemini-mcp-adapter
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  rules:
+    - host: mcp.nilpo.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gemini-mcp-adapter
+                port:
+                  number: 3334
+  tls:
+    - hosts:
+        - mcp.nilpo.org
