@@ -81,9 +81,15 @@ app.get('/.well-known/oauth-authorization-server', (_req, res) => {
     scopes_supported: ['mcp'],
   });
 });
-app.get('/.well-known/oauth-protected-resource/:name', (req, res) => {
+// RFC 9728 path-specific metadata for every instance. Clients probe
+// /.well-known/oauth-protected-resource/mcp/<name>; the root form answers for
+// the whole adapter so a probe without a path also finds us.
+app.get('/.well-known/oauth-protected-resource/mcp/:name', (req, res) => {
   if (!C.getConfig().instances.some((i) => i.name === req.params.name)) return res.status(404).json({ error: 'not_found' });
   res.json({ resource: `${PUBLIC}/mcp/${req.params.name}`, authorization_servers: [PUBLIC], bearer_methods_supported: ['header'] });
+});
+app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+  res.json({ resource: PUBLIC, authorization_servers: [PUBLIC], bearer_methods_supported: ['header'] });
 });
 
 // ---- authorization server ----
@@ -122,8 +128,11 @@ app.post('/oauth/token', (req, res) => {
 });
 
 // ---- MCP endpoints: one per instance, behind bearer auth ----
-const bearer = () =>
+// requireBearerAuth adds WWW-Authenticate: Bearer …, resource_metadata=<per-instance RFC 9728 url>
+// so a 401 tells the client where to discover the authorization server.
+const bearer = (/** @type {string} */ name) =>
   requireBearerAuth({
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL(`${PUBLIC}/mcp/${name}`)),
     verifier: {
       verifyAccessToken: async (token) => {
         const claims = oauth.verifyAccess(token);
@@ -175,14 +184,21 @@ const handlerFor = (/** @type {any} */ inst) => async (/** @type {express.Reques
 // One wildcard route serves every instance; the config is consulted per request,
 // so instances added/edited/removed in the panel (or by editing config.yaml)
 // apply immediately with no re-mount and no restart.
-app.post('/mcp/:name', bearer(), (req, res, next) => {
+app.post('/mcp/:name', (req, res, next) => {
   const inst = C.getConfig().instances.find((i) => i.name === req.params.name);
   if (!inst) return res.status(404).json({ jsonrpc: '2.0', id: null, error: { code: -32601, message: `no such instance: ${req.params.name}` } });
-  handlerFor(inst)(req, res).catch(next);
+  bearer(inst.name)(req, res, (err) => (err ? next(err) : handlerFor(inst)(req, res).catch(next)));
 });
-// Stateless: no GET SSE stream and no session DELETE.
-app.get('/mcp/:name', (_req, res) => res.status(405).end());
-app.delete('/mcp/:name', (_req, res) => res.status(405).end());
+// Stateless: no GET SSE stream and no session DELETE. HEAD answers like GET-minus-body
+// so health probes don't read 405 as "not an MCP endpoint".
+const noStream = (/** @type {express.Request} */ req, /** @type {express.Response} */ res) => {
+  const inst = C.getConfig().instances.find((i) => i.name === req.params.name);
+  if (!inst) return res.status(404).end();
+  res.status(405).set('allow', 'POST').end();
+};
+app.get('/mcp/:name', noStream);
+app.head('/mcp/:name', noStream);
+app.delete('/mcp/:name', noStream);
 
 // ---- panel ----
 app.use('/api', express.json({ limit: '1mb' }));
