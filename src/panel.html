@@ -124,7 +124,7 @@ const probeCache = {};
 function instancesView() {
   const cards = state.instances.map(i => `
     <div class="card" data-name="${esc(i.name)}">
-      <h3>${esc(i.name)} <span class="tag" data-probe>未检测</span> <span class="tag">${esc(i.authType)}</span></h3>
+      <h3>${i.icon?`<img src="${esc(i.icon)}" alt="" width="22" height="22" style="border-radius:5px;object-fit:contain">`:''}${esc(i.name)} <span class="tag" data-probe>未检测</span> <span class="tag">${esc(i.authType)}</span></h3>
       <div class="sub">${esc(i.url)}</div>
       <div class="sub">strip outputSchema: ${i.stripOutputSchema?'on':'off'}${i.headerKeys?.length?' · headers: '+i.headerKeys.map(esc).join(', '):''}${i.paramKeys?.length?' · params: '+i.paramKeys.map(esc).join(', '):''}</div>
       <div class="tools" data-tools></div>
@@ -186,6 +186,7 @@ function openEdit(i) {
     <label data-f="oauth2" class="${isOauth?'':'hidden'}">Client 认证方式<select name="clientAuth"><option value="basic" ${a.clientAuth!=='post'?'selected':''}>Basic（默认）</option><option value="post" ${a.clientAuth==='post'?'selected':''}>POST body</option></select></label>
     <label><input type="checkbox" name="strip" ${i?.stripOutputSchema!==false?'checked':''} style="width:auto"> 剥离 outputSchema（强烈建议：Stitch 417 KB → 8 KB，省 token）</label>
     <label>上游超时（ms）<input name="timeoutMs" type="number" min="1000" max="600000" value="${i?.timeoutMs??90000}"></label>
+    <label>图标 URL（可选，PNG 512×512；写入 MCP serverInfo.icons，支持的客户端会显示）<input name="icon" type="url" placeholder="https://…/logo-512.png" value="${esc(i?.icon??'')}"></label>
     <div class="foot"><button type="button" class="b" data-close>取消</button><button class="b pri" type="submit">保存</button></div>
   </form>`);
   const f = $('#eform');
@@ -194,6 +195,7 @@ function openEdit(i) {
     e.preventDefault();
     const fd = new FormData(f); const t = f.authType.value;
     const body = { name: fd.get('name'), url: fd.get('url'), stripOutputSchema: fd.get('strip')==='on', timeoutMs: Number(fd.get('timeoutMs'))||90000 };
+    if (fd.get('icon')) body.icon = fd.get('icon');
     if (t==='header') { try { body.auth={type:'header',headers:JSON.parse(fd.get('headers')||'{}')}; } catch { return flash('Headers 不是合法 JSON','bad'); } }
     else if (t==='query') { try { body.auth={type:'query',params:JSON.parse(fd.get('params')||'{}')}; } catch { return flash('Params 不是合法 JSON','bad'); } }
     else if (t==='bearer') { body.auth={type:'bearer'}; if (fd.get('token')) body.auth.token=fd.get('token'); if (fd.get('tokenEnv')) body.auth.tokenEnv=fd.get('tokenEnv'); }

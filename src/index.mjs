@@ -143,7 +143,11 @@ const handlerFor = (/** @type {any} */ inst) => async (/** @type {express.Reques
       logReq({ t: Date.now(), inst: inst.name, method: 'initialize', status: up.status, ms: up.ms, client: req.auth?.clientId, err: up.msg?.error?.message });
       if (up.msg?.error) return res.status(502).json(up.msg);
       // present a single stable server identity; keep the negotiated protocol version
-      const result = { ...up.msg.result, serverInfo: { name: `adapter/${inst.name}`, version: '0.1.0' } };
+      // MCP 2025-11: serverInfo.icons — pass the upstream's own through, or the instance's configured icon
+      const icons = inst.icon
+        ? [{ src: inst.icon, ...(inst.iconMime ? { mimeType: inst.iconMime } : {}), sizes: ['512x512'] }]
+        : up.msg.result?.icons;
+      const result = { ...up.msg.result, serverInfo: { name: `adapter/${inst.name}`, version: '0.1.0', ...(icons ? { icons } : {}) } };
       return res.status(200).json({ jsonrpc: '2.0', id: body.id, result });
     }
     if (method === 'ping') return res.status(200).json({ jsonrpc: '2.0', id: body.id, result: {} });
@@ -168,24 +172,17 @@ const handlerFor = (/** @type {any} */ inst) => async (/** @type {express.Reques
   }
 };
 
-/** (Re)mount instance routes. Called at boot and whenever the panel adds instances. */
-const mounted = new Set();
-function mountInstances() {
-  for (const inst of C.getConfig().instances) {
-    if (mounted.has(inst.name)) continue;
-    const name = inst.name;
-    // resolve the live config on every request so edits/deletes apply without re-mounting
-    app.post(`/mcp/${name}`, bearer(), (req, res, next) => {
-      const live = C.getConfig().instances.find((i) => i.name === name);
-      if (!live) return res.status(404).json({ jsonrpc: '2.0', id: null, error: { code: -32601, message: `no such instance: ${name}` } });
-      handlerFor(live)(req, res).catch(next);
-    });
-    app.get(`/mcp/${name}`, (_req, res) => res.status(405).end());
-    app.delete(`/mcp/${name}`, (_req, res) => res.status(405).end());
-    mounted.add(name);
-  }
-  resetUpstreamTokens();
-}
+// One wildcard route serves every instance; the config is consulted per request,
+// so instances added/edited/removed in the panel (or by editing config.yaml)
+// apply immediately with no re-mount and no restart.
+app.post('/mcp/:name', bearer(), (req, res, next) => {
+  const inst = C.getConfig().instances.find((i) => i.name === req.params.name);
+  if (!inst) return res.status(404).json({ jsonrpc: '2.0', id: null, error: { code: -32601, message: `no such instance: ${req.params.name}` } });
+  handlerFor(inst)(req, res).catch(next);
+});
+// Stateless: no GET SSE stream and no session DELETE.
+app.get('/mcp/:name', (_req, res) => res.status(405).end());
+app.delete('/mcp/:name', (_req, res) => res.status(405).end());
 
 // ---- panel ----
 app.use('/api', express.json({ limit: '1mb' }));
@@ -227,6 +224,7 @@ const instanceOut = (/** @type {any} */ i) => ({
   name: i.name, url: i.url, authType: i.auth?.type ?? 'none', stripOutputSchema: i.stripOutputSchema !== false,
   headerKeys: Object.keys(i.auth?.headers ?? i.headers ?? {}), paramKeys: Object.keys(i.auth?.params ?? {}),
   hasSecret: ['header', 'bearer', 'oauth2'].includes(i.auth?.type ?? '') || Object.keys(i.headers ?? {}).length > 0,
+  icon: i.icon,
 });
 app.get('/api/instances', needsPanel, (_req, res) => res.json(C.getConfig().instances.map(instanceOut)));
 app.get('/api/instances/:name', needsPanel, (req, res) => {
@@ -247,13 +245,14 @@ const instanceIn = z.object({
   headers: z.record(z.string(), z.string()).optional(),
   stripOutputSchema: z.boolean().optional(),
   timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+  icon: z.string().url().optional(),
 });
 app.post('/api/instances', needsPanel, (req, res) => {
   const parsed = instanceIn.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join('; ') });
   if (C.getConfig().instances.some((i) => i.name === parsed.data.name)) return res.status(409).json({ error: 'name already exists' });
   C.update((c) => { c.instances.push(parsed.data); });
-  mountInstances();
+  resetUpstreamTokens();
   res.status(201).json(instanceOut(parsed.data));
 });
 app.put('/api/instances/:name', needsPanel, (req, res) => {
@@ -302,7 +301,6 @@ app.get('/api/meta', needsPanel, (_req, res) => res.json({ publicUrl: PUBLIC, al
 app.get('/panel', (_req, res) => res.type('html').send(fs.readFileSync(new URL('./panel.html', import.meta.url))));
 app.get('/', (_req, res) => res.redirect('/panel'));
 
-mountInstances();
 
 // no stack traces to clients
 app.use((err, _req, res, _next) => {
