@@ -302,6 +302,13 @@ app.post('/api/clients', needsPanel, (req, res) => {
   C.update((c) => { c.clients.push({ id, secret, name: String(req.body?.name ?? id) }); });
   res.status(201).json({ id, secret });
 });
+// Panel is already authenticated; let it reveal a client secret on demand (the
+// Gemini dialog and the consent page both need it, and "shown once" was a UX trap).
+app.get('/api/clients/:id/secret', needsPanel, (req, res) => {
+  const c = C.getConfig().clients.find((x) => x.id === req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  res.json({ id: c.id, secret: c.secret });
+});
 app.post('/api/clients/:id/rotate', needsPanel, (req, res) => {
   if (!C.getConfig().clients.some((c) => c.id === req.params.id)) return res.status(404).json({ error: 'not found' });
   const secret = C.newSecret();
